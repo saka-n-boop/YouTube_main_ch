@@ -2,8 +2,6 @@ name: Run News Scraper (Google & Yahoo)
 
 on:
   schedule:
-    # JST 9:00 -> UTC 0:00
-    - cron: '0 0 * * *'
     # JST 10:00 -> UTC 1:00
     - cron: '0 1 * * *'
     # JST 10:10 -> UTC 1:10
@@ -17,9 +15,7 @@ on:
     # JST 10:50 -> UTC 1:50
     - cron: '50 1 * * *'
     # JST 11:00 -> UTC 2:00
-    - cron: '0 2 * * *'
-    # JST 12:00 -> UTC 3:00
-    - cron: '0 3 * * *'
+
 
   workflow_dispatch:
 
