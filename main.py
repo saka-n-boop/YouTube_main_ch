@@ -238,7 +238,7 @@ def main():
     
     # 検索期間設定（2020年1月1日 〜 今日の10:01:00）
     # ※毎日実行しても「2020年からの全リスト」を取得する仕様です
-    start_datetime_jst = "2020-01-01 00:00:00"
+    start_datetime_jst = "2022-01-01 00:00:00"
     end_datetime_jst = f"{sheet_name[:4]}-{sheet_name[4:6]}-{sheet_name[6:]} 23:59:59"
 
     # --- シート存在チェック（APIアクセス前） ---
@@ -291,3 +291,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
