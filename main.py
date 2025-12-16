@@ -9,21 +9,39 @@ from googleapiclient.discovery import build
 
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
 
-def read_config(file_path):
-    """設定ファイル（JSON）からキーワードなどを読み込み、APIキーは環境変数から取得する"""
-    # APIキーを環境変数 'YOUTUBE_API_KEY' から取得
+def get_env_vars():
+    """環境変数からAPIキー、認証情報、スプレッドシートIDを取得"""
     api_key = os.environ.get("YOUTUBE_API_KEY")
+    spreadsheet_id = os.environ.get("SPREADSHEET_ID")
+    service_account_key = os.environ.get("GCP_SERVICE_ACCOUNT_KEY")
+
     if not api_key:
-        # 環境変数が見つからない場合はエラーメッセージを表示してプログラムを終了
         print("エラー: 環境変数 'YOUTUBE_API_KEY' が設定されていません。")
         sys.exit(1)
+    if not spreadsheet_id:
+        print("エラー: 環境変数 'SPREADSHEET_ID' が設定されていません。")
+        sys.exit(1)
+    if not service_account_key:
+        print("エラー: 環境変数 'GCP_SERVICE_ACCOUNT_KEY' が設定されていません。")
+        sys.exit(1)
 
-    # 設定ファイルからキーワードと開始日時を読み込む
+    return api_key, spreadsheet_id, service_account_key
+
+def read_channel_ids(file_path):
+    """channel_ID.txt からチャンネルIDのリストを読み込む"""
+    if not os.path.exists(file_path):
+        print(f"エラー: {file_path} が見つかりません。")
+        sys.exit(1)
+        
     with open(file_path, 'r', encoding='utf-8') as file:
-        config = json.load(file)
+        # 空行を除去してリスト化
+        channel_ids = [line.strip() for line in file if line.strip()]
     
-    # configファイル内にapi_keyが含まれていても無視される（環境変数が優先）
-    return api_key, config['keywords'], config['start_datetime']
+    if not channel_ids:
+        print("エラー: チャンネルIDが記載されていません。")
+        sys.exit(1)
+        
+    return channel_ids
 
 def jst_to_utc(jst_str):
     """JST日時文字列をUTCのISO8601に変換"""
@@ -66,9 +84,11 @@ def calc_engagement_rate(like_count, comment_count, view_count):
         return 0.0
     return round((like_count + comment_count) / view_count * 100, 2)
 
-def get_youtube_data(api_key, keyword, start_datetime_jst, end_datetime_jst, max_total_results=100):
+def get_youtube_data_by_channel(api_key, channel_id, start_datetime_jst, end_datetime_jst, max_total_results=500):
     """
-    指定キーワード・期間のYouTube動画情報を100件上限で取得
+    指定チャンネル・期間の動画情報を取得
+    ※ search APIを使用するため、APIコスト(100/req)に注意。
+    ※ max_total_resultsは多めに設定していますが、API制限考慮のため調整してください。
     """
     youtube = build('youtube', 'v3', developerKey=api_key)
     start_utc = jst_to_utc(start_datetime_jst)
@@ -79,78 +99,101 @@ def get_youtube_data(api_key, keyword, start_datetime_jst, end_datetime_jst, max
     video_ids = []
     next_page_token = None
 
+    # 検索ループ（指定期間内の動画IDを収集）
     while len(video_ids) < max_total_results:
-        search_response = youtube.search().list(
-            q=keyword,
-            part='snippet',
-            type='video',
-            maxResults=min(50, max_total_results - len(video_ids)),
-            publishedAfter=start_utc,
-            publishedBefore=end_utc,
-            pageToken=next_page_token
-        ).execute()
+        try:
+            search_response = youtube.search().list(
+                channelId=channel_id,  # チャンネルID指定
+                part='snippet',
+                type='video',          # 動画のみ
+                order='date',          # 日付順（新しい順）
+                maxResults=min(50, max_total_results - len(video_ids)),
+                publishedAfter=start_utc,
+                publishedBefore=end_utc,
+                pageToken=next_page_token
+            ).execute()
+        except Exception as e:
+            print(f"   ⚠️ APIエラー (Channel ID: {channel_id}): {e}")
+            break
 
         video_ids += [item['id']['videoId'] for item in search_response['items']]
         next_page_token = search_response.get('nextPageToken')
+        
+        # 次のページがない、または上限に達したら終了
         if not next_page_token or len(video_ids) >= max_total_results:
             break
 
+    # 詳細データ取得（統計情報など）
     video_data = []
+    # 50件ずつバッチ処理
     for i in range(0, len(video_ids), 50):
         batch_ids = video_ids[i:i+50]
-        video_response = youtube.videos().list(
-            part='snippet,statistics,contentDetails',
-            id=','.join(batch_ids)
-        ).execute()
+        try:
+            video_response = youtube.videos().list(
+                part='snippet,statistics,contentDetails',
+                id=','.join(batch_ids)
+            ).execute()
 
-        for item in video_response['items']:
-            snippet = item['snippet']
-            statistics = item.get('statistics', {})
-            content_details = item['contentDetails']
+            for item in video_response['items']:
+                snippet = item['snippet']
+                statistics = item.get('statistics', {})
+                content_details = item['contentDetails']
 
-            published_at_utc = snippet['publishedAt']
-            published_at_jst = datetime.strptime(published_at_utc, "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=9)
+                published_at_utc = snippet['publishedAt']
+                published_at_jst = datetime.strptime(published_at_utc, "%Y-%m-%dT%H:%M:%SZ") + timedelta(hours=9)
 
-            # 厳密な時間チェック（YouTube APIのpublishedBefore/Afterは多少曖昧なため）
-            if not (start_dt <= published_at_jst <= end_dt):
-                continue
+                # 念のための期間チェック
+                if not (start_dt <= published_at_jst <= end_dt):
+                    continue
 
-            # 'likeCount'や'commentCount'が存在しない場合があるためgetを使用
-            video_data.append({
-                'title': snippet['title'],
-                'channel': snippet['channelTitle'],
-                'published_at': snippet['publishedAt'],
-                'video_id': item['id'],
-                'view_count': int(statistics.get('viewCount', 0)),
-                'like_count': int(statistics.get('likeCount', 0)),
-                'comment_count': int(statistics.get('commentCount', 0)),
-                'duration': content_details.get('duration', "PT0S")
-            })
+                video_data.append({
+                    'title': snippet['title'],
+                    'channel': snippet['channelTitle'],
+                    'published_at': snippet['publishedAt'],
+                    'video_id': item['id'],
+                    'view_count': int(statistics.get('viewCount', 0)),
+                    'like_count': int(statistics.get('likeCount', 0)),
+                    'comment_count': int(statistics.get('commentCount', 0)),
+                    'duration': content_details.get('duration', "PT0S")
+                })
+        except Exception as e:
+            print(f"   ⚠️ 詳細取得エラー: {e}")
+            continue
 
     return video_data
 
-def merge_and_deduplicate(video_data_list, keywords):
-    """重複削除＋キーワードをタイトルに含む動画のみ抽出"""
+def merge_and_deduplicate(video_data_list):
+    """
+    複数チャンネルのリストを統合し、重複を排除（video_id基準）
+    キーワードフィルタリングは行わず、取得した全動画を対象とする
+    """
     merged = {}
     for video_data in video_data_list:
         for video in video_data:
-            # キーワードがタイトルに含まれているかチェック
-            if any(k in video['title'] for k in keywords):
-                merged[video['video_id']] = video
+            # video_idをキーにして上書き（重複排除）
+            merged[video['video_id']] = video
+    
+    # 辞書の値（動画データ）をリストに戻して返却
     return list(merged.values())
 
-def export_to_google_sheet(video_data, spreadsheet_id, exec_time_jst, sheet_name):
+def export_to_google_sheet(video_data, spreadsheet_id, service_account_key, exec_time_jst, sheet_name):
     """
-    Googleスプレッドシートに出力（新規シート作成しデータ追加）
+    Googleスプレッドシートに出力
     """
-    # サービスアカウント認証 (GCP_SERVICE_ACCOUNT_KEYは環境変数/Secretsから取得)
-    credentials_dict = json.loads(os.environ["GCP_SERVICE_ACCOUNT_KEY"])
+    # サービスアカウント認証
+    credentials_dict = json.loads(service_account_key)
     creds = Credentials.from_service_account_info(credentials_dict, scopes=SCOPES)
     gc = gspread.authorize(creds)
     sh = gc.open_by_key(spreadsheet_id)
 
     # 新しいシートを作成
-    worksheet = sh.add_worksheet(title=sheet_name, rows="100", cols="20")
+    try:
+        worksheet = sh.add_worksheet(title=sheet_name, rows=str(len(video_data)+10), cols="20")
+    except gspread.exceptions.APIError as e:
+        # シートが既に存在する場合などのハンドリング
+        print(f"⚠️ シート作成エラー（既に存在している可能性があります）: {e}")
+        worksheet = sh.worksheet(sheet_name)
+        worksheet.clear() # 既存の場合はクリアして上書き
 
     headers = [
         "動画タイトル", "チャンネル名", "投稿日時（日本時間）", "動画ID",
@@ -176,60 +219,75 @@ def export_to_google_sheet(video_data, spreadsheet_id, exec_time_jst, sheet_name
         ])
     
     # ヘッダーとデータをシートに追加
+    worksheet.clear()
     worksheet.append_row(headers)
-    worksheet.append_rows(rows, value_input_option='USER_ENTERED')
+    if rows:
+        worksheet.append_rows(rows, value_input_option='USER_ENTERED')
 
 def main():
-    # 設定ファイル名
-    config_file = '動画リストconfig.txt'
-    # 自身のスプレッドシートID
-    spreadsheet_id = '1MloHGh089FVzMxP5migrOpHz5VkGuQ-W0-8Ki9MUhdU'
+    # 入力ファイル設定
+    channel_id_file = 'channel_ID.txt'
 
-    # 設定とAPIキーの読み込み（APIキーは環境変数から）
-    api_key, keywords, start_datetime_jst = read_config(config_file)
+    # 環境変数と設定の読み込み
+    api_key, spreadsheet_id, service_account_key = get_env_vars()
+    channel_ids = read_channel_ids(channel_id_file)
 
-    # 今日の日付と実行時間をJSTで取得
+    # 日付設定
     sheet_name = get_current_japan_digit_date()
     exec_time_jst = get_current_japan_time()
     
-    # 検索終了日時を今日の10:01:00 JSTに設定
-    end_datetime_jst = f"{sheet_name[:4]}-{sheet_name[4:6]}-{sheet_name[6:]} 10:01:00"
+    # 検索期間設定（2020年1月1日 〜 今日の10:01:00）
+    # ※毎日実行しても「2020年からの全リスト」を取得する仕様です
+    start_datetime_jst = "2020-01-01 00:00:00"
+    end_datetime_jst = f"{sheet_name[:4]}-{sheet_name[4:6]}-{sheet_name[6:]} 23:59:59"
 
     # --- シート存在チェック（APIアクセス前） ---
-    # GCPサービスアカウント認証
     try:
-        credentials_dict = json.loads(os.environ["GCP_SERVICE_ACCOUNT_KEY"])
-    except KeyError:
-        print("エラー: 環境変数 'GCP_SERVICE_ACCOUNT_KEY' が設定されていません。")
-        sys.exit(1)
+        credentials_dict = json.loads(service_account_key)
+        creds = Credentials.from_service_account_info(credentials_dict, scopes=SCOPES)
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(spreadsheet_id)
+        existing_sheets = [ws.title for ws in sh.worksheets()]
         
-    creds = Credentials.from_service_account_info(credentials_dict, scopes=SCOPES)
-    gc = gspread.authorize(creds)
-    sh = gc.open_by_key(spreadsheet_id)
-    existing_sheets = [ws.title for ws in sh.worksheets()]
+        if sheet_name in existing_sheets:
+            print(f"✅ {sheet_name}シートは既に存在しているため処理をスキップします。")
+            return
+    except Exception as e:
+        print(f"エラー: スプレッドシートへのアクセスに失敗しました。IDや権限を確認してください。\n{e}")
+        sys.exit(1)
+
+    # --- YouTube Data APIアクセス ---
+    video_data_list = []
+    print(f"➡️ YouTubeデータ取得開始 (対象チャンネル: {len(channel_ids)}件, 期間: {start_datetime_jst} 〜)")
     
-    if sheet_name in existing_sheets:
-        print(f"✅ {sheet_name}シートは既に存在しているためAPIアクセスせずにスキップします。")
+    for channel_id in channel_ids:
+        print(f"   - チャンネルID '{channel_id}' 検索中...")
+        # 各チャンネル最大500件まで取得（APIコスト節約のため制限を設けています）
+        video_data = get_youtube_data_by_channel(
+            api_key, 
+            channel_id, 
+            start_datetime_jst, 
+            end_datetime_jst, 
+            max_total_results=500
+        )
+        video_data_list.append(video_data)
+        print(f"     -> {len(video_data)}件取得")
+
+    # データ統合、重複排除（タイトルフィルタリングなし）
+    merged_video_data = merge_and_deduplicate(video_data_list)
+    print(f"➡️ 重複排除後の総動画数: {len(merged_video_data)}件")
+    
+    if not merged_video_data:
+        print("⚠️ 対象期間の動画が見つかりませんでした。")
         return
 
-    # --- 以降のみYouTube Data APIアクセス ---
-    video_data_list = []
-    print(f"➡️ YouTubeデータ取得開始 (キーワード: {len(keywords)}件, 期間: {start_datetime_jst} 〜 {end_datetime_jst})")
-    for keyword in keywords:
-        video_data = get_youtube_data(api_key, keyword, start_datetime_jst, end_datetime_jst, max_total_results=100)
-        video_data_list.append(video_data)
-        print(f"   - キーワード '{keyword}': {len(video_data)}件取得")
-
-    # データ統合、重複排除、タイトルフィルタリング
-    merged_video_data = merge_and_deduplicate(video_data_list, keywords)
-    print(f"➡️ フィルタリング・重複排除後: {len(merged_video_data)}件")
-    
-    # 再生回数でソート
+    # 再生回数でソート（降順）
     merged_video_data.sort(key=lambda x: x['view_count'], reverse=True)
     
     # Googleスプレッドシートに出力
-    export_to_google_sheet(merged_video_data, spreadsheet_id, exec_time_jst, sheet_name)
-    print(f"🎉 処理完了（シート名: {sheet_name}、動画数: {len(merged_video_data)}件）")
+    print("➡️ スプレッドシートへ出力中...")
+    export_to_google_sheet(merged_video_data, spreadsheet_id, service_account_key, exec_time_jst, sheet_name)
+    print(f"🎉 処理完了（シート名: {sheet_name}）")
 
 if __name__ == "__main__":
     main()
