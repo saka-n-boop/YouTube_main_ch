@@ -1,2 +1,2 @@
-# YouTube_Leaf
-新型リーフのYouTubeリスト取得
+# YouTube
+主要7chのYouTubeリスト取得
