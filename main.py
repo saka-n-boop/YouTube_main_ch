@@ -2,7 +2,7 @@ import json
 import os
 import re
 import sys
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone  # timezoneを追加
 import gspread
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -37,7 +37,6 @@ def read_channel_ids(file_path):
     with open(file_path, 'r', encoding='utf-8') as file:
         channel_ids = [line.strip() for line in file if line.strip()]
     
-    # 重複を除去してリスト化
     unique_ids = list(set(channel_ids))
     
     if not unique_ids:
@@ -59,23 +58,30 @@ def iso8601_to_duration(iso_duration):
 
 def convert_to_japan_time(utc_time_str):
     """UTC時刻文字列をJST変換し表示用に"""
-    # dateutilを使用して柔軟にパース（ミリ秒の有無などに対応）
+    # dateutilでパース（タイムゾーン情報付きになる）
     utc_dt = date_parser.parse(utc_time_str)
-    japan_dt = utc_dt.astimezone(timedelta(hours=9)) # UTCオフセット考慮なしの場合は + timedelta(hours=9)
-    # 単純な加算にするためtzinfoを消して計算（API返却値は基本的にUTC+00:00がついている）
-    japan_dt = utc_dt.replace(tzinfo=None) + timedelta(hours=9)
+    
+    # JSTのタイムゾーンオブジェクトを作成
+    JST = timezone(timedelta(hours=9))
+    
+    # JSTに変換
+    japan_dt = utc_dt.astimezone(JST)
+    
     return japan_dt.strftime("%Y/%m/%d %H:%M:%S")
 
 def get_current_japan_time():
     """現在時刻 (JST表示)"""
-    now_utc = datetime.utcnow()
-    now_jst = now_utc + timedelta(hours=9)
+    # UTC現在時刻を取得し、JSTに変換
+    now_utc = datetime.now(timezone.utc)
+    JST = timezone(timedelta(hours=9))
+    now_jst = now_utc.astimezone(JST)
     return now_jst.strftime("%Y/%m/%d %H:%M:%S")
 
 def get_current_japan_digit_date():
     """今日の日付 (JST, シート名用 'YYYYMMDD' フォーマット)"""
-    now_utc = datetime.utcnow()
-    now_jst = now_utc + timedelta(hours=9)
+    now_utc = datetime.now(timezone.utc)
+    JST = timezone(timedelta(hours=9))
+    now_jst = now_utc.astimezone(JST)
     return now_jst.strftime("%Y%m%d")
 
 def calc_engagement_rate(like_count, comment_count, view_count):
@@ -86,31 +92,34 @@ def calc_engagement_rate(like_count, comment_count, view_count):
 
 def get_uploads_playlist_id(youtube, channel_id):
     """チャンネルIDから「アップロード済みプレイリストID」を取得"""
-    response = youtube.channels().list(
-        id=channel_id,
-        part='contentDetails'
-    ).execute()
-    
-    if not response['items']:
+    try:
+        response = youtube.channels().list(
+            id=channel_id,
+            part='contentDetails'
+        ).execute()
+        
+        if not response['items']:
+            return None
+        
+        return response['items'][0]['contentDetails']['relatedPlaylists']['uploads']
+    except Exception as e:
+        print(f"   ⚠️ チャンネル情報取得エラー ({channel_id}): {e}")
         return None
-    
-    return response['items'][0]['contentDetails']['relatedPlaylists']['uploads']
 
 def get_all_videos_since_2020(api_key, channel_id):
     """
     指定チャンネルの2020年以降の全動画を取得（PlaylistItems使用）
-    コスト: 低 (1req = 1unit)
     """
     youtube = build('youtube', 'v3', developerKey=api_key)
     
     # 1. アップロード済みプレイリストIDを取得
     uploads_playlist_id = get_uploads_playlist_id(youtube, channel_id)
     if not uploads_playlist_id:
-        print(f"   ⚠️ チャンネルが見つかりません: {channel_id}")
+        print(f"   ⚠️ チャンネルが見つかりませんまたは取得できません: {channel_id}")
         return []
 
-    # 2020年1月1日 (UTC) を境界線とする
-    cutoff_date = datetime(2020, 1, 1, 0, 0, 0)
+    # 2020年1月1日 (UTC, aware) を境界線とする
+    cutoff_date = datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
 
     video_ids = []
     next_page_token = None
@@ -118,35 +127,35 @@ def get_all_videos_since_2020(api_key, channel_id):
 
     # 2. プレイリストから動画IDリストを取得（新しい順に取得される）
     while is_fetching:
-        pl_request = youtube.playlistItems().list(
-            playlistId=uploads_playlist_id,
-            part='snippet', # snippetにpublishedAtが含まれる
-            maxResults=50,
-            pageToken=next_page_token
-        )
-        pl_response = pl_request.execute()
+        try:
+            pl_request = youtube.playlistItems().list(
+                playlistId=uploads_playlist_id,
+                part='snippet',
+                maxResults=50,
+                pageToken=next_page_token
+            )
+            pl_response = pl_request.execute()
 
-        for item in pl_response['items']:
-            published_at_str = item['snippet']['publishedAt']
-            # 文字列をdatetimeに変換
-            dt = date_parser.parse(published_at_str).replace(tzinfo=None)
+            for item in pl_response['items']:
+                published_at_str = item['snippet']['publishedAt']
+                dt = date_parser.parse(published_at_str)
 
-            if dt < cutoff_date:
-                # 2020年より古くなったらループ終了
-                is_fetching = False
+                # 時刻比較
+                if dt < cutoff_date:
+                    is_fetching = False
+                    break
+                
+                video_ids.append(item['snippet']['resourceId']['videoId'])
+
+            next_page_token = pl_response.get('nextPageToken')
+            if not next_page_token:
                 break
-            
-            video_ids.append(item['snippet']['resourceId']['videoId'])
-
-        next_page_token = pl_response.get('nextPageToken')
-        if not next_page_token:
+        except Exception as e:
+            print(f"   ⚠️ プレイリスト取得エラー: {e}")
             break
 
-    # 3. 集めた動画IDを使って統計情報（再生数など）を取得
-    #    videos().listはコスト1req = 1unit (ID指定の場合)
+    # 3. 詳細情報を取得
     final_video_data = []
-    
-    # 50件ずつバッチ処理
     for i in range(0, len(video_ids), 50):
         batch_ids = video_ids[i:i+50]
         try:
@@ -185,9 +194,8 @@ def export_to_google_sheet(video_data, spreadsheet_id, service_account_key, exec
 
     # シート作成または取得
     try:
-        worksheet = sh.add_worksheet(title=sheet_name, rows=str(len(video_data)+50), cols="20")
+        worksheet = sh.add_worksheet(title=sheet_name, rows=str(len(video_data)+100), cols="20")
     except gspread.exceptions.APIError:
-        # 既に存在する場合はそのシートを取得してクリア
         worksheet = sh.worksheet(sheet_name)
         worksheet.clear()
 
@@ -197,13 +205,19 @@ def export_to_google_sheet(video_data, spreadsheet_id, service_account_key, exec
         "エンゲージメント率(%)", "ダウンロード実行時間（日本時間）"
     ]
     rows = []
+    
+    # データを整形
     for video in video_data:
         engagement_rate = calc_engagement_rate(video['like_count'], video['comment_count'], video['view_count'])
         video_url = f"https://www.youtube.com/watch?v={video['video_id']}"
+        
+        # ここで convert_to_japan_time を呼ぶ（修正済み）
+        jst_time = convert_to_japan_time(video['published_at'])
+        
         rows.append([
             video['title'],
             video['channel'],
-            convert_to_japan_time(video['published_at']),
+            jst_time,
             video['video_id'],
             video_url,
             video['view_count'],
@@ -214,18 +228,18 @@ def export_to_google_sheet(video_data, spreadsheet_id, service_account_key, exec
             exec_time_jst
         ])
     
-    # データ書き込み
+    # 書き込み実行（データ量が多いのでバッチ更新を使用）
     worksheet.update('A1', [headers])
     if rows:
+        # データ量が多い場合のタイムアウト対策として、本来は分割すべきですが
+        # gspreadのupdateは比較的高速なのでまずは一括で試みます
         worksheet.update('A2', rows, value_input_option='USER_ENTERED')
 
 def main():
     channel_id_file = 'channel_ID.txt'
     api_key, spreadsheet_id, service_account_key = get_env_vars()
     
-    # チャンネルID読み込み（重複排除済み）
     channel_ids = read_channel_ids(channel_id_file)
-
     sheet_name = get_current_japan_digit_date()
     exec_time_jst = get_current_japan_time()
 
@@ -235,10 +249,7 @@ def main():
 
     for idx, channel_id in enumerate(channel_ids, 1):
         print(f"   [{idx}/{len(channel_ids)}] Channel ID: {channel_id} 処理中...")
-        
-        # チャンネルごとの動画取得
         channel_videos = get_all_videos_since_2020(api_key, channel_id)
-        
         print(f"     -> {len(channel_videos)}件 取得完了")
         all_video_data.extend(channel_videos)
 
@@ -246,7 +257,7 @@ def main():
         print("⚠️ 動画が1件も見つかりませんでした。")
         return
 
-    # 全体の重複排除（念のためvideo_idで）
+    # 全体の重複排除
     unique_videos = {v['video_id']: v for v in all_video_data}.values()
     final_list = list(unique_videos)
 
