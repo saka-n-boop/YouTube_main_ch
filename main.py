@@ -90,14 +90,14 @@ def get_uploads_playlist_id(youtube, channel_id):
         print(f"   ⚠️ チャンネル情報取得エラー ({channel_id}): {e}")
         return None
 
-def get_all_videos_since_2020(api_key, channel_id):
+def get_all_videos_since_2025(api_key, channel_id):
     youtube = build('youtube', 'v3', developerKey=api_key)
     uploads_playlist_id = get_uploads_playlist_id(youtube, channel_id)
     if not uploads_playlist_id:
         print(f"   ⚠️ チャンネルが見つかりませんまたは取得できません: {channel_id}")
         return []
 
-    cutoff_date = datetime(2020, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    cutoff_date = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
     video_ids = []
     next_page_token = None
     is_fetching = True
@@ -233,11 +233,11 @@ def main():
     channel_ids = read_channel_ids(channel_id_file)
     exec_time_jst = get_current_japan_time()
 
-    print(f"➡️ YouTubeデータ取得開始 (対象チャンネル: {len(channel_ids)}件, 2020年以降)")
+    print(f"➡️ YouTubeデータ取得開始 (対象チャンネル: {len(channel_ids)}件, 2025年以降)")
     all_video_data = []
     for idx, channel_id in enumerate(channel_ids, 1):
         print(f"   [{idx}/{len(channel_ids)}] Channel ID: {channel_id} 処理中...")
-        channel_videos = get_all_videos_since_2020(api_key, channel_id)
+        channel_videos = get_all_videos_since_2025(api_key, channel_id)
         print(f"     -> {len(channel_videos)}件 取得完了")
         all_video_data.extend(channel_videos)
 
@@ -264,3 +264,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
