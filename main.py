@@ -87,15 +87,32 @@ def get_uploads_playlist_id(youtube, channel_id):
             return None
         return response['items'][0]['contentDetails']['relatedPlaylists']['uploads']
     except Exception as e:
-        print(f"   ⚠️ チャンネル情報取得エラー ({channel_id}): {e}")
+        print(f"    ⚠️ チャンネル情報取得エラー ({channel_id}): {e}")
         return None
+
+def get_channel_description(youtube, channel_id):
+    """チャンネルの概要を取得"""
+    try:
+        response = youtube.channels().list(
+            id=channel_id,
+            part='snippet'
+        ).execute()
+        if response['items']:
+            return response['items'][0]['snippet'].get('description', "")
+        return ""
+    except Exception as e:
+        print(f"    ⚠️ チャンネル概要取得エラー: {e}")
+        return ""
 
 def get_all_videos_since_2025(api_key, channel_id):
     youtube = build('youtube', 'v3', developerKey=api_key)
     uploads_playlist_id = get_uploads_playlist_id(youtube, channel_id)
     if not uploads_playlist_id:
-        print(f"   ⚠️ チャンネルが見つかりませんまたは取得できません: {channel_id}")
+        print(f"    ⚠️ チャンネルが見つかりませんまたは取得できません: {channel_id}")
         return []
+
+    # チャンネル概要を1回だけ取得
+    channel_desc = get_channel_description(youtube, channel_id)
 
     cutoff_date = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
     video_ids = []
@@ -122,7 +139,7 @@ def get_all_videos_since_2025(api_key, channel_id):
             if not next_page_token:
                 break
         except Exception as e:
-            print(f"   ⚠️ プレイリスト取得エラー: {e}")
+            print(f"    ⚠️ プレイリスト取得エラー: {e}")
             break
 
     final_video_data = []
@@ -140,6 +157,7 @@ def get_all_videos_since_2025(api_key, channel_id):
                 final_video_data.append({
                     'title': snippet['title'],
                     'channel': snippet['channelTitle'],
+                    'channel_description': channel_desc, # 概要を追加
                     'published_at': snippet['publishedAt'],
                     'video_id': item['id'],
                     'view_count': int(statistics.get('viewCount', 0)),
@@ -148,7 +166,7 @@ def get_all_videos_since_2025(api_key, channel_id):
                     'duration': content_details.get('duration', "PT0S")
                 })
         except Exception as e:
-            print(f"   ⚠️ 詳細取得エラー: {e}")
+            print(f"    ⚠️ 詳細取得エラー: {e}")
             continue
     return final_video_data
 
@@ -156,7 +174,7 @@ def prepare_rows(video_data, exec_time_jst):
     headers = [
         "動画タイトル", "チャンネル名", "投稿日時（日本時間）", "動画ID",
         "動画URL", "再生回数", "高評価数", "視聴者コメント数", "動画の長さ",
-        "エンゲージメント率(%)", "ダウンロード実行時間（日本時間）"
+        "エンゲージメント率(%)", "チャンネル概要", "ダウンロード実行時間（日本時間）"
     ]
     rows = []
     for video in video_data:
@@ -174,14 +192,14 @@ def prepare_rows(video_data, exec_time_jst):
             video['comment_count'],
             iso8601_to_duration(video['duration']),
             engagement_rate,
+            video['channel_description'], # エンゲージメント率の隣に追加
             exec_time_jst
         ])
     return headers, rows
 
 def save_to_history_sheet(gc, spreadsheet_id, sheet_name, headers, rows):
-    """【履歴用】新規シート作成（同名シートがある場合はエラーになる前提）"""
+    """【履歴用】新規シート作成"""
     sh = gc.open_by_key(spreadsheet_id)
-    # ここでは単純にadd_worksheetするだけ（重複チェックはmain関数で済み）
     worksheet = sh.add_worksheet(title=sheet_name, rows=str(len(rows)+100), cols="20")
     
     worksheet.update('A1', [headers])
@@ -210,7 +228,7 @@ def check_if_processed(service_account_key, spreadsheet_id, sheet_name):
         
         existing_sheets = [ws.title for ws in sh.worksheets()]
         if sheet_name in existing_sheets:
-            return True, gc # 存在するのでTrueと、ついでに認証済みクライアントを返す
+            return True, gc 
         return False, gc
     except Exception as e:
         print(f"エラー: スプレッドシートの確認に失敗しました: {e}")
@@ -222,13 +240,11 @@ def main():
     
     sheet_name = get_current_japan_digit_date()
     
-    # --- 【スキップ機能】実行済みチェック ---
     is_processed, gc = check_if_processed(service_account_key, spreadsheet_id, sheet_name)
     if is_processed:
         print(f"✅ シート '{sheet_name}' は既に存在するため、本日の処理をスキップします。")
         print("   (配布用シートの更新も行いません)")
         return
-    # ------------------------------------
 
     channel_ids = read_channel_ids(channel_id_file)
     exec_time_jst = get_current_japan_time()
@@ -238,7 +254,7 @@ def main():
     for idx, channel_id in enumerate(channel_ids, 1):
         print(f"   [{idx}/{len(channel_ids)}] Channel ID: {channel_id} 処理中...")
         channel_videos = get_all_videos_since_2025(api_key, channel_id)
-        print(f"     -> {len(channel_videos)}件 取得完了")
+        print(f"      -> {len(channel_videos)}件 取得完了")
         all_video_data.extend(channel_videos)
 
     if not all_video_data:
@@ -253,15 +269,10 @@ def main():
 
     headers, rows = prepare_rows(final_list, exec_time_jst)
 
-    # チェック時に作ったgc(gspread client)を再利用して書き込み
-    # 1. 履歴用へ保存
     save_to_history_sheet(gc, spreadsheet_id, sheet_name, headers, rows)
-
-    # 2. 配布用へ上書き保存
     save_to_distribution_sheet(gc, dist_spreadsheet_id, headers, rows)
 
     print(f"🎉 全処理完了")
 
 if __name__ == "__main__":
     main()
-
