@@ -1,4 +1,4 @@
-name: Run News Scraper (Google & Yahoo)
+name: Run YouTube list Scraper
 
 on:
   schedule:
