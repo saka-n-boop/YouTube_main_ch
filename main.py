@@ -18,16 +18,16 @@ def get_env_vars():
     service_account_key = os.environ.get("GCP_SERVICE_ACCOUNT_KEY")
 
     if not api_key:
-        print("エラー: 環境変数 'YOUTUBE_API_KEY' が設定されていません。")
+        print("エラー: 設定している環境変数 'YOUTUBE_API_KEY' が取得できません。")
         sys.exit(1)
     if not spreadsheet_id:
-        print("エラー: 環境変数 'SPREADSHEET_ID' が設定されていません。")
+        print("エラー: 設定している環境変数 'SPREADSHEET_ID' が取得できません。")
         sys.exit(1)
     if not dist_spreadsheet_id:
-        print("エラー: 環境変数 'DIST_SPREADSHEET_ID' が設定されていません。")
+        print("エラー: 設定している環境変数 'DIST_SPREADSHEET_ID' が取得できません。")
         sys.exit(1)
     if not service_account_key:
-        print("エラー: 環境変数 'GCP_SERVICE_ACCOUNT_KEY' が設定されていません。")
+        print("エラー: 設定している環境変数 'GCP_SERVICE_ACCOUNT_KEY' が取得できません。")
         sys.exit(1)
 
     return api_key, spreadsheet_id, dist_spreadsheet_id, service_account_key
@@ -90,14 +90,20 @@ def get_uploads_playlist_id(youtube, channel_id):
         print(f"   ?? チャンネル情報取得エラー ({channel_id}): {e}")
         return None
 
-def get_all_videos_since_2025(api_key, channel_id):
+def get_all_videos_since_2026(api_key, channel_id):
+    """
+    日本時間(JST)で 2026/01/01 以降に公開された動画のみ取得する
+    """
     youtube = build('youtube', 'v3', developerKey=api_key)
     uploads_playlist_id = get_uploads_playlist_id(youtube, channel_id)
     if not uploads_playlist_id:
         print(f"   ?? チャンネルが見つかりませんまたは取得できません: {channel_id}")
         return []
 
-    cutoff_date = datetime(2025, 1, 1, 0, 0, 0, tzinfo=timezone.utc)
+    # 日本時間での締切日時（2026-01-01 00:00:00 JST）
+    JST = timezone(timedelta(hours=9))
+    cutoff_jst = datetime(2026, 1, 1, 0, 0, 0, tzinfo=JST)
+
     video_ids = []
     next_page_token = None
     is_fetching = True
@@ -113,11 +119,17 @@ def get_all_videos_since_2025(api_key, channel_id):
             pl_response = pl_request.execute()
             for item in pl_response['items']:
                 published_at_str = item['snippet']['publishedAt']
-                dt = date_parser.parse(published_at_str)
-                if dt < cutoff_date:
+                # APIは通常UTCで返すので、まずUTCとして解釈し、その後JSTに変換
+                dt_utc = date_parser.parse(published_at_str)
+                dt_jst = dt_utc.astimezone(JST)
+
+                # 日本時間の cutoff_jst より前なら、それ以降の動画は取得しない
+                if dt_jst < cutoff_jst:
                     is_fetching = False
                     break
+
                 video_ids.append(item['snippet']['resourceId']['videoId'])
+
             next_page_token = pl_response.get('nextPageToken')
             if not next_page_token:
                 break
@@ -233,11 +245,11 @@ def main():
     channel_ids = read_channel_ids(channel_id_file)
     exec_time_jst = get_current_japan_time()
 
-    print(f"?? YouTubeデータ取得開始 (対象チャンネル: {len(channel_ids)}件, 2025年以降)")
+    print(f"?? YouTubeデータ取得開始 (対象チャンネル: {len(channel_ids)}件, 2026年以降・日本時間基準)")
     all_video_data = []
     for idx, channel_id in enumerate(channel_ids, 1):
         print(f"   [{idx}/{len(channel_ids)}] Channel ID: {channel_id} 処理中...")
-        channel_videos = get_all_videos_since_2025(api_key, channel_id)
+        channel_videos = get_all_videos_since_2026(api_key, channel_id)
         print(f"     -> {len(channel_videos)}件 取得完了")
         all_video_data.extend(channel_videos)
 
@@ -264,4 +276,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
