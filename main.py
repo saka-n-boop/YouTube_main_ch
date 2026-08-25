@@ -166,9 +166,9 @@ def get_all_videos_since_2026(api_key, channel_id):
 
 def prepare_rows(video_data, exec_time_jst):
     headers = [
-        "動画タイトル", "チャンネル名", "投稿日時（日本時間）", "動画ID",
+        "動画タイトル", "チャンネル名", "投稿日時", "動画ID",
         "動画URL", "再生回数", "高評価数", "視聴者コメント数", "動画の長さ",
-        "エンゲージメント率(%)", "ダウンロード実行時間（日本時間）"
+        "エンゲージメント率(%)", "ダウンロード実行時間"
     ]
     rows = []
     for video in video_data:
