@@ -1,18 +1,7 @@
 name: Run YouTube list Scraper
 
 on:
-  schedule:
-    # JST 10:00 -> UTC 1:00
-    - cron: '0 15 * * *'
-    # JST 10:10 -> UTC 1:10
-    - cron: '7 15 * * *'
-    # JST 10:20 -> UTC 1:20
-    - cron: '17 15 * * *'
-    # JST 10:30 -> UTC 1:30
-    - cron: '27 15 * * *'
-    # JST 10:40 -> UTC 1:40
-    - cron: '37 15 * * *'
-
+  # GASなどの外部APIやGitHub画面からの手動実行を受け付ける設定
   workflow_dispatch:
 
 jobs:
@@ -35,7 +24,7 @@ jobs:
 
     - name: Run Scraper
       env:
-      # ここでシークレットを環境変数にマッピング
+        # ここでシークレットを環境変数にマッピング
         YOUTUBE_API_KEY: ${{ secrets.YOUTUBE_API_KEY }}
         GCP_SERVICE_ACCOUNT_KEY: ${{ secrets.GCP_SERVICE_ACCOUNT_KEY }}
         SPREADSHEET_ID: ${{ secrets.SPREADSHEET_ID }}
