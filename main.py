@@ -69,20 +69,62 @@ def iso8601_to_seconds(iso_duration):
     minutes = int(match.group(2)) if match.group(2) else 0
     seconds = int(match.group(3)) if match.group(3) else 0
     return hours * 3600 + minutes * 60 + seconds
+JP_PATTERN = re.compile(r'[\u3040-\u309F\u30A0-\u30FF\u4E00-\u9FFF]')
 
-def make_remarks(iso_duration, view_count):
+def contains_japanese(text):
+    """タイトル・チャンネル名に日本語が含まれているか判定"""
+    return bool(JP_PATTERN.search(text))
+
+def make_remarks(video, prev_views_original, exec_time_jst):
     """
-    備考列の文字列を作成
-    - 3分未満(180秒未満)なら「3分未満」
-    - それ以外で再生回数1万未満なら「1万回未満」
-    - それ以外は空文字
-    ※ 3分未満→1万回未満の順でチェックし、併記はしない
+    備考列の文字列を作成（優先度付きで1つだけ付与）
+
+    優先度:
+      1. 動画長さ < 3分       → 「3分未満」
+      2. 再生回数 < 1万        → 「1万回未満」
+      3. タイトル/チャンネルに日本語なし → 備考は空
+      4. 前日の投稿           → 「最新投稿」
+      5. 前日 <1万 & 今日 >=1万 → 「1万回越え」
+
+    video: 今回取得した動画情報(dict)
+    prev_views_original: 前回の再生回数 (存在しなければ None)
+    exec_time_jst: ダウンロード実行時間 (JST文字列, 例: "2026/01/15 09:00:00")
     """
-    duration_seconds = iso8601_to_seconds(iso_duration)
+    # 1) 動画長さが 3分未満 → 「3分未満」
+    duration_seconds = iso8601_to_seconds(video['duration'])
     if duration_seconds < 180:
         return "3分未満"
-    if view_count < 10000:
+
+    # 2) 再生回数 1万回未満 → 「1万回未満」
+    current_views = video['view_count']
+    if current_views < 10000:
         return "1万回未満"
+
+    # 3) タイトル・チャンネル名ともに日本語が含まれていない場合は備考なし
+    title_has_jp = contains_japanese(video['title'])
+    channel_has_jp = contains_japanese(video['channel'])
+    if not (title_has_jp or channel_has_jp):
+        return ""
+
+    # 4) 最新投稿（前日の投稿）
+    #    2つ目のプログラムと同様に、「実行日の前日」に投稿されたものを「最新投稿」とみなします。
+    exec_dt = date_parser.parse(exec_time_jst)
+    JST = timezone(timedelta(hours=9))
+    exec_dt = exec_dt.astimezone(JST)
+    day_before = (exec_dt - timedelta(days=1)).date()
+
+    published_jst_str = convert_to_japan_time(video['published_at'])
+    published_jst = date_parser.parse(published_jst_str).date()
+
+    if published_jst == day_before:
+        return "最新投稿"
+
+    # 5) 1万回越え（前回 <1万 & 今回 >=1万）
+    if prev_views_original is not None:
+        if (prev_views_original < 10000) and (current_views >= 10000):
+            return "1万回越え"
+
+    # どれにも該当しない場合は空文字
     return ""
 
 def convert_to_japan_time(utc_time_str):
@@ -326,18 +368,27 @@ def prepare_rows(video_data, exec_time_jst, prev_view_counts):
     rows = []
     for video in video_data:
         current_views = video['view_count']
-        prev_views = prev_view_counts.get(video['video_id'], 0)  # 前回データがなければ0扱い
-        diff_views = current_views - prev_views
+        video_id = video['video_id']
+
+        # 差分計算用: 前回データがなければ 0 扱い
+        prev_views_for_diff = prev_view_counts.get(video_id, 0)
+
+        # 備考用: 「前回データが存在していたかどうか」を判別するために、元の値 (Noneあり) も渡す
+        prev_views_original = prev_view_counts.get(video_id, None)
+
+        diff_views = current_views - prev_views_for_diff
 
         engagement_rate = calc_engagement_rate(
             video['like_count'],
             video['comment_count'],
             current_views
         )
-        video_url = f"https://www.youtube.com/watch?v={video['video_id']}"
+        video_url = f"https://www.youtube.com/watch?v={video_id}"
         jst_time = convert_to_japan_time(video['published_at'])
         duration_str = iso8601_to_duration(video['duration'])
-        remarks = make_remarks(video['duration'], current_views)
+
+        # 新しい備考ロジックを利用
+        remarks = make_remarks(video, prev_views_original, exec_time_jst)
 
         rows.append([
             video_url,              # 動画URL
@@ -348,12 +399,12 @@ def prepare_rows(video_data, exec_time_jst, prev_view_counts):
             video['comment_count'], # 視聴者コメント数
             video['like_count'],    # 高評価数
             duration_str,           # 動画の長さ
-            prev_views,             # 前日再生回数
+            prev_views_for_diff,    # 前日再生回数
             diff_views,             # 再生回数差分
             engagement_rate,        # エンゲージメント率(%)
             exec_time_jst,          # ダウンロード実行時間
             remarks,                # 備考
-            video['video_id'],      # 動画ID
+            video_id,               # 動画ID
         ])
     return headers, rows
 
